@@ -70,7 +70,9 @@ eps = 1e-12
 frac_cpg_ct = X_counts[:, cpg_ct_mask()].sum(axis=1) / (burden + eps)
 frac_tc      = X_counts[:, block_mask(4)].sum(axis=1)      / (burden + eps)  # T>C
 frac_ca      = X_counts[:, block_mask(0)].sum(axis=1)      / (burden + eps)  # C>A
-frac_cg      = X_counts[:, block_mask(1)].sum(axis=1)      / (burden + eps)  # C>G  <-- NEW
+frac_cg      = X_counts[:, block_mask(1)].sum(axis=1)      / (burden + eps)  # C>G
+frac_ta      = X_counts[:, block_mask(3)].sum(axis=1)      / (burden + eps)  # T>A  <-- NEW
+frac_tg      = X_counts[:, block_mask(5)].sum(axis=1)      / (burden + eps)  # T>G  <-- NEW
 apobec_score = X_counts[:, apobec_mask()].sum(axis=1)      / (burden + eps)
 
 # --- plot helper that SAVES to sbs_figs ---
@@ -91,5 +93,7 @@ umap_color(np.log10(burden+1), "log10 mutation burden",  "umap_burden.png")
 umap_color(frac_cpg_ct,       "fraction C>T at CpG",     "umap_cpg_ct.png")
 umap_color(frac_tc,           "fraction T>C",            "umap_tc.png")
 umap_color(frac_ca,           "fraction C>A",            "umap_ca.png")
-umap_color(frac_cg,           "fraction C>G",            "umap_cg.png")  # <-- NEW
+umap_color(frac_cg,           "fraction C>G",            "umap_cg.png")
+umap_color(frac_ta,           "fraction T>A",            "umap_ta.png")   # <-- NEW
+umap_color(frac_tg,           "fraction T>G",            "umap_tg.png")   # <-- NEW
 umap_color(apobec_score,      "APOBEC proxy (TpCpW)",    "umap_apobec.png")
