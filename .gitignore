@@ -1,2 +1,5 @@
 .DS_Store
 mc3.v0.2.8.PUBLIC.maf
+*.pyc
+__pycache__/
+.env
