@@ -232,15 +232,10 @@ def nnls_factorization_baseline(
     """
     Non-Bayesian NNLS factorization of Y given fixed theta:
 
-      y_bar(i,ℓ) = Y(i,ℓ) / u_i
-      y_bar(:,ℓ) ≈ theta @ a_ℓ,  with a_ℓ ≥ 0
+      minimize  sum_{i,l} (Y_{i l} - u_i (θ A)_{i l})^2
+      subject to A_{kl} ≥ 0, sum_l A_{kl} = 1.
 
-    Row-normalize A afterward so each signature sums to 1.
-
-    Returns
-    -------
-    A_nnls_df : DataFrame (signatures × consequences)
-    lambda_Y_df : DataFrame (samples × consequences)
+    Implemented column-wise with NNLS, then row-normalized.
     """
     if not _HAS_SCIPY:
         raise RuntimeError("SciPy not available; install scipy to use NNLS baseline.")
@@ -252,21 +247,23 @@ def nnls_factorization_baseline(
             raise RuntimeError("Model has no Y_df stored; pass Y_df explicitly.")
         Y_df = model.Y_df
 
-    Y = Y_df.values.astype(float)
-    theta_mean = model.theta_mean
-    u = model.u
-    eps = 1e-8
-    u_safe = np.where(u <= 0.0, eps, u)
-    y_bar = Y / u_safe[:, None]
+    Y = Y_df.values.astype(float)           # n × L
+    theta_mean = model.theta_mean           # n × K
+    u = model.u                             # n
+
+    # Design matrix for LS: (D_u Θ)
+    Theta_tilde = theta_mean * u[:, None]   # n × K
 
     n, L = Y.shape
     K = theta_mean.shape[1]
     A = np.zeros((K, L))
 
     for l in range(L):
-        a_l, _ = nnls(theta_mean, y_bar[:, l])
+        # Solve: min ||Theta_tilde a_l - Y[:, l]||_2^2  s.t. a_l >= 0
+        a_l, _ = nnls(Theta_tilde, Y[:, l])
         A[:, l] = a_l
 
+    # Enforce row-sum=1 (approximation to the constrained LS)
     row_sums = A.sum(axis=1, keepdims=True)
     row_sums = np.where(row_sums == 0.0, 1.0, row_sums)
     A_norm = A / row_sums
@@ -279,4 +276,5 @@ def nnls_factorization_baseline(
 
     lam = u[:, None] * (theta_mean @ A_norm)
     lambda_Y_df = pd.DataFrame(lam, index=Y_df.index, columns=Y_df.columns)
+
     return A_nnls_df, lambda_Y_df
