@@ -1,7 +1,7 @@
 # eval.py
 from __future__ import annotations
 
-from typing import Optional, Dict, Tuple
+from typing import Dict, Tuple
 
 import numpy as np
 import pandas as pd
@@ -20,7 +20,7 @@ except ImportError:
 def _deviance_poisson_np(
     Y: np.ndarray,
     lam: np.ndarray,
-    axis: Optional[int] = None,
+    axis: int | None,
 ) -> np.ndarray:
     """
     Poisson deviance: D = 2 * sum [ y * log(y/λ) - (y - λ) ].
@@ -52,10 +52,10 @@ def _rmse_np(Y: np.ndarray, lam: np.ndarray) -> float:
 
 def evaluate_fit_Y(
     model: GammaPoissonCoupledModel,
-    Y_df: Optional[pd.DataFrame] = None,
+    Y_df: pd.DataFrame | None = None,
 ) -> Dict[str, object]:
     """
-    Evaluate fit for consequence counts Y using a fitted model.
+    Evaluat2e fit for consequence counts Y using a fitted model.
 
     Parameters
     ----------
@@ -96,7 +96,7 @@ def evaluate_fit_Y(
 
 def predictive_loglik_Y(
     model: GammaPoissonCoupledModel,
-    Y_df: Optional[pd.DataFrame] = None,
+    Y_df: pd.DataFrame | None,
 ) -> float:
     """
     Approximate predictive log-likelihood for Y under Poisson with λ_hat.
@@ -125,7 +125,7 @@ def predictive_loglik_Y(
 def posterior_predictive_Y(
     model: GammaPoissonCoupledModel,
     num_draws: int = 1,
-    random_state: Optional[int] = None,
+    random_state: int | None = None,
 ) -> Tuple[np.ndarray, pd.Index, pd.Index]:
     """
     Draw posterior predictive replicated consequence counts:
@@ -184,7 +184,9 @@ def global_consequence_baseline(
 
 def shared_consequence_baseline(
     model: GammaPoissonCoupledModel,
-    Y_df: Optional[pd.DataFrame] = None,
+    Y_df: pd.DataFrame | None = None,
+    theta_df: pd.DataFrame | None = None,
+    u: np.ndarray | None = None,
 ) -> Tuple[pd.Series, pd.DataFrame]:
     """
     Shared consequence mixture baseline:
@@ -203,12 +205,19 @@ def shared_consequence_baseline(
             raise RuntimeError("Model has no Y_df stored; pass Y_df explicitly.")
         Y_df = model.Y_df
 
-    if model.u is None:
-        raise RuntimeError("Model not fitted; u undefined.")
+    if theta_df is None:
+        if model.theta_df is None:
+            raise RuntimeError("Model not fitted; theta undefined.")
+        theta_df = model.theta_df
+
+    if u is None:
+        if model.u is None:
+            raise RuntimeError("Model not fitted; u undefined.")
+        u = model.u
 
     Y = Y_df.values.astype(float)
-    theta_mean = model.theta_mean  # n×K
-    r = model.u * theta_mean.sum(axis=1)  # (n,)
+    theta_mean = theta_df  # n×K
+    r = u * theta_mean.values.sum(axis=1)  # (n,)
 
     denom = r.sum()
     n, L = Y.shape
@@ -227,7 +236,7 @@ def shared_consequence_baseline(
 
 def nnls_factorization_baseline(
     model: GammaPoissonCoupledModel,
-    Y_df: Optional[pd.DataFrame] = None,
+    Y_df: pd.DataFrame | None = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Non-Bayesian NNLS factorization of Y given fixed theta:

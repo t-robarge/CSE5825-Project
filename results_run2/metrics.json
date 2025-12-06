@@ -1,0 +1,8 @@
+{
+  "global_deviance": 63362.481522029964,
+  "rmse_coupled": 7.006071145741447,
+  "rmse_global_baseline": 41.83402761228037,
+  "rmse_shared_baseline": 55.26852250531789,
+  "nnls_available": true,
+  "rmse_nnls_baseline": 49.128366884658725
+}

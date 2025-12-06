@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from typing import Optional, Tuple, List
+from typing import Tuple, List
 
 import numpy as np
 import pandas as pd
@@ -15,17 +15,127 @@ from eval import (
     global_consequence_baseline,
     shared_consequence_baseline,
     nnls_factorization_baseline,
-    _rmse_np,  # internal but handy
+    _rmse_np,              
+    _deviance_poisson_np, 
 )
 
 
+
 # ---------------------- labeled simulation ---------------------------
+def infer_theta_for_new_samples(
+    model: GammaPoissonCoupledModel,
+    X_df: pd.DataFrame,
+    Y_df: pd.DataFrame,
+    max_iter: int | None = None,
+    tol: float | None = None,
+) -> pd.DataFrame:
+    """
+    Infer theta for new samples given fixed A (from a fitted model).
+
+    Parameters
+    ----------
+    model : fitted GammaPoissonCoupledModel
+        Must already have A_mean, C_sig_ctx, config, etc.
+    X_df : DataFrame (samples × contexts)
+    Y_df : DataFrame (samples × consequences)
+        Must have matching sample IDs.
+
+    Returns
+    -------
+    theta_new_df : DataFrame (samples × signatures)
+        Posterior means E_q[theta] for the new samples.
+    """
+    if not X_df.index.equals(Y_df.index):
+        Y_df = Y_df.reindex(index=X_df.index)
+        if Y_df.isnull().any().any():
+            raise ValueError("Sample IDs in X_test and Y_test do not match and cannot be aligned.")
+
+    # Align columns to model ordering
+    if list(X_df.columns) != model.context_labels:
+        X_df = X_df.reindex(columns=model.context_labels)
+    if list(Y_df.columns) != model.consequence_labels:
+        Y_df = Y_df.reindex(columns=model.consequence_labels)
+
+    X = X_df.values.astype(float)   # (n, M)
+    Y = Y_df.values.astype(float)   # (n, L)
+    n, M = X.shape
+    _, L = Y.shape
+
+    K = model.K
+    C_sig_ctx = model.C_sig_ctx          # (K, M)
+    A_mean = model.A_mean                # (K, L)
+
+    s = X.sum(axis=1)                    # SBS burden
+    u = Y.sum(axis=1)                    # consequence burden
+
+    cfg = model.config
+    if max_iter is None:
+        max_iter = cfg.max_iter
+    if tol is None:
+        tol = cfg.tol
+
+    # Broadcast hyperparameters as in model.fit
+    a_h = np.broadcast_to(cfg.a, (K,))
+    b_h = np.broadcast_to(cfg.b, (K,))
+
+    C_row_sums = C_sig_ctx.sum(axis=1)   # (K,)
+    A_row_sums = A_mean.sum(axis=1)      # (K,)
+
+    rng = np.random.default_rng(cfg.random_state)
+    a_tilde = np.tile(a_h, (n, 1)) + rng.gamma(
+        shape=1.0, scale=0.1, size=(n, K)
+    )
+    b_tilde = np.tile(b_h, (n, 1)) + 1.0
+
+    prev_theta = a_tilde / b_tilde
+
+    for it in range(max_iter):
+        theta_mean = a_tilde / b_tilde   # (n, K)
+
+        # r_X for test
+        thetaC = theta_mean[:, :, None] * C_sig_ctx[None, :, :]  # n×K×M
+        denom_X = thetaC.sum(axis=1, keepdims=True)              # n×1×M
+        denom_X = np.where(denom_X == 0.0, 1.0, denom_X)
+        r_X = thetaC / denom_X                                   # n×K×M
+        X_hat_sum_m = (X[:, None, :] * r_X).sum(axis=2)          # n×K
+
+        # r_Y for test
+        thetaA = theta_mean[:, :, None] * A_mean[None, :, :]     # n×K×L
+        denom_Y = thetaA.sum(axis=1, keepdims=True)              # n×1×L
+        denom_Y = np.where(denom_Y == 0.0, 1.0, denom_Y)
+        r_Y = thetaA / denom_Y                                   # n×K×L
+        Y_hat = Y[:, None, :] * r_Y                              # n×K×L
+        Y_hat_sum_l = Y_hat.sum(axis=2)                          # n×K
+
+        # Gamma updates for theta (A fixed)
+        a_tilde = a_h[None, :] + X_hat_sum_m + Y_hat_sum_l
+        b_tilde = (
+            b_h[None, :]
+            + s[:, None] * C_row_sums[None, :]
+            + u[:, None] * A_row_sums[None, :]
+        )
+
+        rel_change_theta = np.max(
+            np.abs(theta_mean - prev_theta) / (1.0 + np.abs(prev_theta))
+        )
+        if rel_change_theta < tol:
+            break
+        prev_theta = theta_mean
+
+    theta_mean = a_tilde / b_tilde
+    theta_new_df = pd.DataFrame(
+        theta_mean,
+        index=X_df.index,
+        columns=model.signature_labels,
+    )
+    test_u = Y.sum(axis=1)
+    return theta_new_df, test_u
 
 def simulate_coupled_data(
     n_samples: int,
     C_ctx_sig_df: pd.DataFrame,
     consequence_labels: List[str],
-    random_state: Optional[int] = None,
+    random_state: int | None = None,
 ) -> Tuple[
     pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, np.ndarray, np.ndarray
 ]:
@@ -140,7 +250,7 @@ def main():
     parser.add_argument("--C_csv", required=True,
                         help="Path to C CSV (contexts × signatures). First column = context labels.")
 
-    parser.add_argument("--max_iter", type=int, default=500)
+    parser.add_argument("--max_iter", type=int, default=600)
     parser.add_argument("--tol", type=float, default=1e-4)
     parser.add_argument("--a", type=float, default=1.0)
     parser.add_argument("--b", type=float, default=1.0)
@@ -151,6 +261,12 @@ def main():
 
     parser.add_argument("--outdir", type=str, default=None,
                         help="If set, save theta, A, lambda, and metrics here (CSV + JSON).")
+    parser.add_argument(
+        "--test_frac",
+        type=float,
+        default=0.0,
+        help="Fraction of samples to hold out as a test set (0 = no split).",
+    )
 
     args = parser.parse_args()
 
@@ -164,6 +280,29 @@ def main():
     print(f"Y consequences: {len(Y_df.columns)}")
     print(f"C contexts: {len(C_df.index)}, signatures: {len(C_df.columns)}")
 
+    if args.test_frac > 0.0:
+        rng = np.random.default_rng(args.seed)
+        all_ids = np.array(X_df.index)
+        n_total = len(all_ids)
+        n_test = int(np.floor(args.test_frac * n_total))
+        perm = rng.permutation(n_total)
+        test_ids = all_ids[perm[:n_test]]
+        train_ids = all_ids[perm[n_test:]]
+
+        X_train = X_df.loc[train_ids]
+        Y_train = Y_df.loc[train_ids]
+        X_test = X_df.loc[test_ids]
+        Y_test = Y_df.loc[test_ids]
+
+        print(
+            f"\nTrain/test split: {len(train_ids)} train, "
+            f"{len(test_ids)} test (frac={args.test_frac:.2f})"
+        )
+    else:
+        X_train, Y_train = X_df, Y_df
+        X_test, Y_test = None, None
+        train_ids = X_df.index
+        test_ids = None
     # Create config and model
     K = C_df.shape[1]
     cfg = GammaPoissonConfig(
@@ -179,27 +318,39 @@ def main():
     model = GammaPoissonCoupledModel(K=K, config=cfg)
 
     # Fit
-    model.fit(X_df, Y_df, C_df)
+    model.fit(X_train, Y_train, C_df)
 
     # Evaluate
     metrics = evaluate_fit_Y(model)
     print("\n--- Coupled model ---")
     print(f"Global deviance: {metrics['global_deviance']:.3f}")
     print(f"RMSE: {metrics['rmse']:.4f}")
+    if X_test is not None and Y_test is not None:
+        theta_test_df, u_test = infer_theta_for_new_samples(model, X_test, Y_test)
+        A_mean = model.A_df.values.astype(float)
+        u_test = Y_test.sum(axis=1).values.astype(float)
+
+        lam_test = u_test[:, None] * (theta_test_df.values @ A_mean)
+        dev_test = _deviance_poisson_np(Y_test.values, lam_test, axis=None)
+        rmse_test = _rmse_np(Y_test.values, lam_test)
+
+        print("\n--- Coupled model (test set, held-out samples) ---")
+        print(f"Test global deviance: {dev_test:.3f}")
+        print(f"Test RMSE: {rmse_test:.4f}")
 
     # Baselines
     print("\n--- Baselines ---")
-    A_bar, lam_global_df = global_consequence_baseline(Y_df)
-    rmse_global = _rmse_np(Y_df.values, lam_global_df.values)
+    A_bar, lam_global_df = global_consequence_baseline(Y_train)
+    rmse_global = _rmse_np(Y_train.values, lam_global_df.values)
     print(f"Global baseline RMSE: {rmse_global:.4f}")
 
-    A_shared, lam_shared_df = shared_consequence_baseline(model, Y_df)
-    rmse_shared = _rmse_np(Y_df.values, lam_shared_df.values)
+    A_shared, lam_shared_df = shared_consequence_baseline(model, Y_train)
+    rmse_shared = _rmse_np(Y_train.values, lam_shared_df.values)
     print(f"Shared-A baseline RMSE: {rmse_shared:.4f}")
 
     try:
-        A_nnls_df, lam_nnls_df = nnls_factorization_baseline(model, Y_df)
-        rmse_nnls = _rmse_np(Y_df.values, lam_nnls_df.values)
+        A_nnls_df, lam_nnls_df = nnls_factorization_baseline(model, Y_train)
+        rmse_nnls = _rmse_np(Y_train.values, lam_nnls_df.values)
         print(f"NNLS baseline RMSE: {rmse_nnls:.4f}")
         nnls_available = True
     except RuntimeError as e:
@@ -208,6 +359,19 @@ def main():
         rmse_nnls = None
         nnls_available = False
 
+    # test baselines on test set if available
+    if X_test is not None and Y_test is not None:
+        print("\n--- Baselines (test set) ---")
+
+        # Global consequence baseline on test set
+        A_bar_test, lam_global_test_df = global_consequence_baseline(Y_test)
+        rmse_global_test = _rmse_np(Y_test.values, lam_global_test_df.values)
+        print(f"Global baseline RMSE (test): {rmse_global_test:.4f}")
+
+        # Shared-A baseline on test set
+        A_shared_test, lam_shared_test_df = shared_consequence_baseline(model, Y_test, theta_test_df, u_test)
+        rmse_shared_test = _rmse_np(Y_test.values, lam_shared_test_df.values)
+        print(f"Shared-A baseline RMSE (test): {rmse_shared_test:.4f}")
     # Save outputs
     if args.outdir is not None:
         os.makedirs(args.outdir, exist_ok=True)

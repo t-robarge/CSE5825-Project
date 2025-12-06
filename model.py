@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import List
 
 import numpy as np
 import pandas as pd
@@ -16,7 +16,7 @@ class GammaPoissonConfig:
     b: float = 1.0             # hyperparameters for theta (Gamma rate)
     beta: float = 1.0          # hyperparameters for A (Gamma shape)
     gamma: float = 1.0         # hyperparameters for A (Gamma rate)
-    random_state: Optional[int] = 0
+    random_state: int | None = 0
     verbose: bool = True
 
 
@@ -36,36 +36,36 @@ class GammaPoissonCoupledModel:
 
     # --------------------------- init ---------------------------------
 
-    def __init__(self, K: int, config: Optional[GammaPoissonConfig] = None):
+    def __init__(self, K: int, config: GammaPoissonConfig | None = None):
         self.K = K
         self.config = config or GammaPoissonConfig()
         self._rng = np.random.default_rng(self.config.random_state)
 
         # Variational parameters (numpy arrays)
-        self.a_tilde: Optional[np.ndarray] = None  # (n, K)
-        self.b_tilde: Optional[np.ndarray] = None  # (n, K)
-        self.beta_tilde: Optional[np.ndarray] = None  # (K, L)
-        self.gamma_tilde: Optional[np.ndarray] = None  # (K, L)
+        self.a_tilde: np.ndarray | None = None  # (n, K)
+        self.b_tilde: np.ndarray | None = None  # (n, K)
+        self.beta_tilde: np.ndarray | None = None  # (K, L)
+        self.gamma_tilde: np.ndarray | None = None  # (K, L)
 
         # Observed / fixed data (DataFrames)
-        self.X_df: Optional[pd.DataFrame] = None           # samples × contexts
-        self.Y_df: Optional[pd.DataFrame] = None           # samples × consequences
-        self.C_ctx_sig_df: Optional[pd.DataFrame] = None   # contexts × signatures
+        self.X_df: pd.DataFrame | None = None           # samples × contexts
+        self.Y_df: pd.DataFrame | None = None           # samples × consequences
+        self.C_ctx_sig_df: pd.DataFrame | None = None   # contexts × signatures
 
         # Numeric versions for fast math
-        self.X: Optional[np.ndarray] = None       # (n, M)
-        self.Y: Optional[np.ndarray] = None       # (n, L)
-        self.C_sig_ctx: Optional[np.ndarray] = None  # (K, M) signatures × contexts
+        self.X: np.ndarray | None = None       # (n, M)
+        self.Y: np.ndarray | None = None       # (n, L)
+        self.C_sig_ctx: np.ndarray | None = None  # (K, M) signatures × contexts
 
         # Row-sum scalings
-        self.s: Optional[np.ndarray] = None  # total SBS counts per sample (n,)
-        self.u: Optional[np.ndarray] = None  # total consequence counts per sample (n,)
+        self.s: np.ndarray | None = None  # total SBS counts per sample (n,)
+        self.u: np.ndarray | None = None  # total consequence counts per sample (n,)
 
         # Labels for interpretation
-        self.sample_ids: Optional[List[str]] = None
-        self.context_labels: Optional[List[str]] = None
-        self.consequence_labels: Optional[List[str]] = None
-        self.signature_labels: Optional[List[str]] = None
+        self.sample_ids: List[str] | None = None
+        self.context_labels: List[str] | None = None
+        self.consequence_labels: List[str] | None = None
+        self.signature_labels: List[str] | None = None
 
     # ---------------------- properties / accessors ---------------------
 
