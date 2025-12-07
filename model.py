@@ -6,7 +6,7 @@ from typing import List
 
 import numpy as np
 import pandas as pd
-
+from scipy.special import digamma, gammaln
 
 @dataclass
 class GammaPoissonConfig:
@@ -214,6 +214,7 @@ class GammaPoissonCoupledModel:
 
         prev_theta = self.theta_mean.copy()
         prev_A = self.A_mean.copy()
+        prev_elbo = -np.inf
 
         # ----------------- VI update loop ------------------------------
 
@@ -227,8 +228,8 @@ class GammaPoissonCoupledModel:
             denom_X = thetaC.sum(axis=1, keepdims=True)                   # n×1×M
             denom_X = np.where(denom_X == 0.0, 1.0, denom_X)
             r_X = thetaC / denom_X                                        # n×K×M
-
-            X_hat_sum_m = (self.X[:, None, :] * r_X).sum(axis=2)          # n×K
+            X_hat = self.X[:, None, :] * r_X                              # n×K×M
+            X_hat_sum_m = X_hat.sum(axis=2)                               # n×K
 
             # ------- consequence responsibilities r_Y(i,k,l) -------
             thetaA = theta_mean[:, :, None] * A_mean[None, :, :]          # n×K×L
@@ -258,7 +259,7 @@ class GammaPoissonCoupledModel:
             gamma_add = (self.u[:, None] * theta_mean).sum(axis=0)        # K
             self.gamma_tilde = gamma_h[None, :] + gamma_add[:, None]      # K×L
 
-            # ------- Convergence check -------
+            # ------- Convergence check (ELBO-based) -------
             if it % 10 == 0 or it == self.config.max_iter - 1:
                 theta_now = self.theta_mean
                 A_now = self.A_mean
@@ -271,14 +272,23 @@ class GammaPoissonCoupledModel:
                 )
                 max_rel_change = max(rel_change_theta, rel_change_A)
 
-                if self.config.verbose:
-                    print(f"[iter {it}] max relative change: {max_rel_change:.3e}")
+                elbo_now = self._elbo_from_current_state(r_X, r_Y, X_hat, Y_hat)
 
-                if max_rel_change < self.config.tol:
+                if self.config.verbose:
+                    print(
+                        f"[iter {it}] max rel change: {max_rel_change:.3e}, "
+                        f"ELBO: {elbo_now:.3e}"
+                    )
+
+                if elbo_now - prev_elbo < self.config.tol:
                     if self.config.verbose:
-                        print(f"Converged after {it} iterations.")
+                        print(
+                            f"Converged after {it} iterations: "
+                            f"ΔELBO={elbo_now - prev_elbo:.3e} < {self.config.tol}"
+                        )
                     break
 
+                prev_elbo = elbo_now
                 prev_theta = theta_now.copy()
                 prev_A = A_now.copy()
 
@@ -324,3 +334,97 @@ class GammaPoissonCoupledModel:
         return pd.DataFrame(lam,
                             index=self.sample_ids,
                             columns=self.context_labels)
+# ------------------------------------------------------------ elbo ------------------------------------------------------------
+
+    def _elbo_from_current_state(self, r_X, r_Y, X_hat, Y_hat) -> float:
+        """
+        Full ELBO (up to data-only constants) given current variational params
+        and responsibilities r_X, r_Y, expected allocations X_hat, Y_hat.
+        """
+        X = self.X.astype(float)        # (n,M)
+        Y = self.Y.astype(float)        # (n,L)
+        s = self.s                      # (n,)
+        u = self.u                      # (n,)
+        C = self.C_sig_ctx              # (K,M)
+
+        a_t = self.a_tilde              # (n,K)
+        b_t = self.b_tilde              # (n,K)
+        beta_t = self.beta_tilde        # (K,L)
+        gamma_t = self.gamma_tilde      # (K,L)
+
+        theta_mean = a_t / b_t
+        A_mean = beta_t / gamma_t
+
+        E_log_theta = digamma(a_t) - np.log(b_t)
+        E_log_A = digamma(beta_t) - np.log(gamma_t)
+
+        # hyperparameters
+        K = self.K
+        _, L = A_mean.shape
+        a_h = np.broadcast_to(self.config.a, (K,))
+        b_h = np.broadcast_to(self.config.b, (K,))
+        beta_h = np.broadcast_to(self.config.beta, (L,))
+        gamma_h = np.broadcast_to(self.config.gamma, (L,))
+
+        a0 = a_h[None, :]
+        b0 = b_h[None, :]
+        beta0 = beta_h[None, :]
+        gamma0 = gamma_h[None, :]
+
+        # --- theta prior + entropy ---
+        log_p_theta = np.sum(
+            (a0 - 1.0) * E_log_theta
+            - b0 * theta_mean
+            - gammaln(a0) + a0 * np.log(b0)
+        )
+        H_theta = np.sum(
+            a_t - np.log(b_t) + gammaln(a_t) + (1.0 - a_t) * digamma(a_t)
+        )
+
+        # --- A prior + entropy ---
+        log_p_A = np.sum(
+            (beta0 - 1.0) * E_log_A
+            - gamma0 * A_mean
+            - gammaln(beta0) + beta0 * np.log(gamma0)
+        )
+        H_A = np.sum(
+            beta_t - np.log(gamma_t) + gammaln(beta_t) + (1.0 - beta_t) * digamma(beta_t)
+        )
+
+        # --- X allocation / Poisson part ---
+        log_s = np.log(np.where(s <= 0.0, 1e-12, s))
+        log_C = np.log(np.where(C <= 0.0, 1e-12, C))
+
+        term_X1 = (
+            X_hat
+            * (
+                log_s[:, None, None]
+                + log_C[None, :, :]
+                + E_log_theta[:, :, None]
+                - np.log(np.where(r_X <= 0.0, 1e-12, r_X))
+            )
+        ).sum()
+
+        term_X2 = ((s[:, None] * theta_mean) @ C).sum()
+
+        L_X = term_X1 - term_X2
+
+        # --- Y allocation / Poisson part ---
+        log_u = np.log(np.where(u <= 0.0, 1e-12, u))
+
+        term_Y1 = (
+            Y_hat
+            * (
+                log_u[:, None, None]
+                + E_log_theta[:, :, None]
+                + E_log_A[None, :, :]
+                - np.log(np.where(r_Y <= 0.0, 1e-12, r_Y))
+            )
+        ).sum()
+
+        term_Y2 = ((u[:, None] * theta_mean) @ A_mean).sum()
+
+        L_Y = term_Y1 - term_Y2
+
+        elbo = log_p_theta + H_theta + log_p_A + H_A + L_X + L_Y
+        return float(elbo)

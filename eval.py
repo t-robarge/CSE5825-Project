@@ -41,12 +41,82 @@ def _deviance_poisson_np(
     else:
         return dev.sum(axis=axis)
 
+def deviance_per_cell_Y(
+    Y_df: pd.DataFrame,
+    lam_df: pd.DataFrame,
+) -> float:
+    """
+    Deviance per cell:
+
+      D = Poisson deviance(Y, λ)
+      D_per_cell = D / (n * L)
+
+    where n = #samples, L = #consequences.
+    """
+    Y = Y_df.values.astype(float)
+    lam = lam_df.values.astype(float)
+    D = _deviance_poisson_np(Y, lam, axis=None)
+    n, L = Y.shape
+    return float(D / (n * L))
 
 def _rmse_np(Y: np.ndarray, lam: np.ndarray) -> float:
     """Root mean squared error between Y and λ."""
     diff2 = (Y - lam) ** 2
     return float(np.sqrt(diff2.mean()))
 
+def per_sample_rmse_Y(
+    Y_df: pd.DataFrame,
+    lam_df: pd.DataFrame,
+) -> pd.Series:
+    """
+    Per-sample RMSE for Y:
+
+      RMSE_i = sqrt( mean_l (Y_{i,l} - λ_{i,l})^2 )
+
+    Returns
+    -------
+    Series indexed by sample_id.
+    """
+    Y = Y_df.values.astype(float)
+    lam = lam_df.values.astype(float)
+    diff2 = (Y - lam) ** 2
+    rmse_per = np.sqrt(diff2.mean(axis=1))  # (n,)
+    return pd.Series(rmse_per, index=Y_df.index, name="rmse_per_sample")
+
+def relative_error_Y(
+    Y_df: pd.DataFrame,
+    lam_df: pd.DataFrame,
+) -> Dict[str, object]:
+    """
+    Relative error metrics for Y:
+
+      rel_err_{i,l} = |Y_{i,l} - λ_{i,l}| / (1 + Y_{i,l})
+
+    Returns
+    -------
+    dict with:
+      - "rel_err_df": DataFrame (samples × consequences)
+      - "mean_rel_err": float (global mean over all cells)
+      - "mean_rel_err_per_sample": Series (mean over consequences for each sample)
+    """
+    Y = Y_df.values.astype(float)
+    lam = lam_df.values.astype(float)
+
+    rel = np.abs(Y - lam) / (1.0 + Y)
+    rel_df = pd.DataFrame(rel, index=Y_df.index, columns=Y_df.columns)
+
+    mean_rel = float(rel.mean())
+    mean_rel_per_sample = pd.Series(
+        rel.mean(axis=1),
+        index=Y_df.index,
+        name="mean_rel_err_per_sample",
+    )
+
+    return {
+        "rel_err_df": rel_df,
+        "mean_rel_err": mean_rel,
+        "mean_rel_err_per_sample": mean_rel_per_sample,
+    }
 
 # -------------------- model-based evaluation (Y) ---------------------
 
@@ -80,18 +150,27 @@ def evaluate_fit_Y(
     Y = Y_df.values
     lam = lam_df.values
 
-    per_sample_dev = _deviance_poisson_np(Y, lam, axis=1)  # (n,)
+    per_sample_dev = _deviance_poisson_np(Y, lam, axis=1)
     global_dev = float(per_sample_dev.sum())
     err = _rmse_np(Y, lam)
 
     per_sample_dev_series = pd.Series(per_sample_dev, index=Y_df.index)
+    rmse_per_sample = per_sample_rmse_Y(Y_df, lam_df)
+    dev_per_cell = deviance_per_cell_Y(Y_df, lam_df)
+    rel_err_stats = relative_error_Y(Y_df, lam_df)
 
     return {
         "lambda_Y_df": lam_df,
         "per_sample_deviance": per_sample_dev_series,
         "global_deviance": global_dev,
+        "deviance_per_cell": dev_per_cell,
         "rmse": err,
+        "rmse_per_sample": rmse_per_sample,
+        "mean_rel_err": rel_err_stats["mean_rel_err"],
+        "mean_rel_err_per_sample": rel_err_stats["mean_rel_err_per_sample"],
     }
+
+
 
 
 def predictive_loglik_Y(
