@@ -260,7 +260,7 @@ def global_consequence_baseline(
     lambda_Y_df = pd.DataFrame(lam, index=Y_df.index, columns=Y_df.columns)
     return A_bar, lambda_Y_df
 
-
+## NO LONGER USED ##
 def shared_consequence_baseline(
     model: GammaPoissonCoupledModel,
     Y_df: pd.DataFrame | None = None,
@@ -357,12 +357,80 @@ def nnls_factorization_baseline(
     A_norm = A / row_sums
 
     A_nnls_df = pd.DataFrame(
-        A_norm,
+        A,
         index=model.signature_labels,
         columns=Y_df.columns,
     )
 
-    lam = u[:, None] * (theta_mean @ A_norm)
+    lam = u[:, None] * (theta_mean @ A)
     lambda_Y_df = pd.DataFrame(lam, index=Y_df.index, columns=Y_df.columns)
 
     return A_nnls_df, lambda_Y_df
+
+def nnls_factorization_baseline_predict(
+    model: GammaPoissonCoupledModel,
+    A_nnls_df: pd.DataFrame,
+    Y_df: pd.DataFrame | None = None,
+    theta_df: pd.DataFrame | None = None,
+    u: np.ndarray | None = None,
+) -> pd.DataFrame:
+    """
+    Given an NNLS-estimated A (typically from the training set), compute
+    baseline predictions for a new dataset (e.g. test set):
+
+        λ_hat(i,ℓ) = u_i * (θ A_nnls)_{iℓ}
+
+    Parameters
+    ----------
+    model : GammaPoissonCoupledModel
+        Used only as a fallback source for theta / u if not passed explicitly.
+    A_nnls_df : DataFrame (K × L)
+        NNLS-estimated consequence matrix (rows = signatures, cols = consequences).
+    Y_df : DataFrame (samples × consequences), optional
+        Only used for sample index / column labels. If None, we infer the index
+        from theta_df and columns from A_nnls_df.
+    theta_df : DataFrame (samples × K), optional
+        Signature exposures for the dataset (e.g. test set). If None, falls back
+        to model.theta_mean.
+    u : np.ndarray, shape (n,), optional
+        Total mutation counts per sample for the dataset. If None, falls back
+        to model.u.
+
+    Returns
+    -------
+    lambda_Y_df : DataFrame (samples × consequences)
+        Predicted mean counts under the NNLS baseline.
+    """
+    # Exposures
+    if theta_df is None:
+        if getattr(model, "theta_mean", None) is None:
+            raise RuntimeError("theta_df not provided and model.theta_mean is undefined.")
+        theta_mean = model.theta_mean
+    else:
+        theta_mean = theta_df
+
+    # Mutation burdens
+    if u is None:
+        if getattr(model, "u", None) is None:
+            raise RuntimeError("u not provided and model.u is undefined.")
+        u_vec = model.u
+    else:
+        u_vec = np.asarray(u, dtype=float)
+
+    Theta = theta_mean.values.astype(float)          # n × K
+    A_nnls = A_nnls_df.values.astype(float)          # K × L
+
+    # λ_hat = u_i * (Θ A)_iℓ
+    lam = u_vec[:, None] * (Theta @ A_nnls)          # n × L
+
+    # Index / column labels
+    if Y_df is not None:
+        index = Y_df.index
+        columns = Y_df.columns
+    else:
+        index = theta_mean.index
+        columns = A_nnls_df.columns
+
+    lambda_Y_df = pd.DataFrame(lam, index=index, columns=columns)
+    return lambda_Y_df
+

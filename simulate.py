@@ -4,8 +4,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from typing import Tuple, List
 
+from typing import Tuple, List
+from sklearn.model_selection import StratifiedShuffleSplit 
 import numpy as np
 import pandas as pd
 
@@ -15,6 +16,7 @@ from eval import (
     global_consequence_baseline,
     shared_consequence_baseline,
     nnls_factorization_baseline,
+    nnls_factorization_baseline_predict,
     _rmse_np,              
     _deviance_poisson_np, 
 )
@@ -250,7 +252,7 @@ def main():
     parser.add_argument("--C_csv", required=True,
                         help="Path to C CSV (contexts × signatures). First column = context labels.")
 
-    parser.add_argument("--max_iter", type=int, default=600)
+    parser.add_argument("--max_iter", type=int, default=1000)
     parser.add_argument("--tol", type=float, default=1e-4)
     parser.add_argument("--a", type=float, default=1.0)
     parser.add_argument("--b", type=float, default=1.0)
@@ -274,30 +276,61 @@ def main():
     X_df = load_X_csv(args.X_csv)
     Y_df = load_Y_csv(args.Y_csv)
     C_df = load_C_txt(args.C_csv)
+    if args.X_csv == 'sbs96_by_tumor_with_cancer_type.csv':
+        # keep only OV in X
+        X_df = X_df[X_df['Cancer_Type'] == 'BRCA'].copy()
 
+        # and subset Y to the same samples
+        Y_df = Y_df.loc[X_df.index]
+        # drop Cancer_Type column
+        X_df = X_df.drop(columns=['Cancer_Type'])
     print(f"Loaded X: {X_df.shape}, Y: {Y_df.shape}, C: {C_df.shape}")
     print(f"X samples: {len(X_df.index)}, contexts: {len(X_df.columns)}")
     print(f"Y consequences: {len(Y_df.columns)}")
     print(f"C contexts: {len(C_df.index)}, signatures: {len(C_df.columns)}")
 
     if args.test_frac > 0.0:
-        rng = np.random.default_rng(args.seed)
-        all_ids = np.array(X_df.index)
-        n_total = len(all_ids)
-        n_test = int(np.floor(args.test_frac * n_total))
-        perm = rng.permutation(n_total)
-        test_ids = all_ids[perm[:n_test]]
-        train_ids = all_ids[perm[n_test:]]
+        # total consequence burden per tumor
+        burden = Y_df.sum(axis=1)  # pandas Series, index = sample IDs
+        n_total = len(burden)
 
+        # number of bins for stratification (at most 5, but not more than n_total)
+        n_bins = min(5, n_total)
+
+        strat_labels = None
+        if n_bins >= 2:
+            try:
+                # quantile-based bins: 0, 1, ..., n_bins-1
+                strat_labels = pd.qcut(
+                    burden,
+                    q=n_bins,
+                    labels=False,
+                    duplicates="drop"
+                )
+            except ValueError:
+                strat_labels = None
+
+        if strat_labels is not None:
+            print(
+                f"\nUsing stratified train/test split by total consequence burden "
+                f"into {len(np.unique(strat_labels.dropna()))} strata."
+            )
+            sss = StratifiedShuffleSplit(
+                n_splits=1,
+                test_size=args.test_frac,
+                random_state=args.seed,
+            )
+            all_idx = np.arange(n_total)
+            (train_idx, test_idx), = sss.split(all_idx, strat_labels.values)
+
+            all_ids = np.array(X_df.index)
+            train_ids = all_ids[train_idx]
+            test_ids = all_ids[test_idx]
+        
         X_train = X_df.loc[train_ids]
         Y_train = Y_df.loc[train_ids]
         X_test = X_df.loc[test_ids]
         Y_test = Y_df.loc[test_ids]
-
-        print(
-            f"\nTrain/test split: {len(train_ids)} train, "
-            f"{len(test_ids)} test (frac={args.test_frac:.2f})"
-        )
     else:
         X_train, Y_train = X_df, Y_df
         X_test, Y_test = None, None
@@ -372,6 +405,21 @@ def main():
         A_shared_test, lam_shared_test_df = shared_consequence_baseline(model, Y_test, theta_test_df, u_test)
         rmse_shared_test = _rmse_np(Y_test.values, lam_shared_test_df.values)
         print(f"Shared-A baseline RMSE (test): {rmse_shared_test:.4f}")
+
+        # NNLS baseline on test set
+        # Train side
+        A_nnls_df, lambda_train_nnls = nnls_factorization_baseline(model, Y_train)
+
+        # Test side (using same A_nnls_df)
+        lambda_test_nnls = nnls_factorization_baseline_predict(
+            model,           # just for fallbacks if you like
+            A_nnls_df,
+            Y_df=Y_test,
+            theta_df=theta_test_df,
+            u=u_test,
+        )
+        rmse_nnls_test = _rmse_np(Y_test.values, lambda_test_nnls.values)
+        print(f"NNLS baseline RMSE (test): {rmse_nnls_test:.4f}")
     # Save outputs
     if args.outdir is not None:
         os.makedirs(args.outdir, exist_ok=True)
@@ -405,7 +453,8 @@ def main():
             lam_nnls_df.to_csv(
                 os.path.join(args.outdir, "lambda_Y_nnls_baseline.csv")
             )
-
+        # ELBO history
+        model.elbo_history.to_csv(os.path.join(args.outdir, "elbo_history.csv"))
         # Metrics JSON
         metrics_out = {
             "global_deviance": float(metrics["global_deviance"]),

@@ -1,4 +1,3 @@
-# model.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,7 +5,8 @@ from typing import List
 
 import numpy as np
 import pandas as pd
-from scipy.special import digamma, gammaln
+from scipy.special import digamma, gammaln, softmax
+
 
 @dataclass
 class GammaPoissonConfig:
@@ -22,16 +22,16 @@ class GammaPoissonConfig:
 
 class GammaPoissonCoupledModel:
     """
-    Coupled Gamma–Poisson factorization with labeled data.
+    Coupled Gamma-Poisson factorization with labeled data.
 
     Inputs (all pandas DataFrames):
-      X_df: samples × contexts (SBS96 mutation counts)
-      Y_df: samples × consequences
-      C_ctx_sig_df: contexts × signatures (fixed COSMIC signatures)
+      X_df: samples x contexts (SBS96 mutation counts)
+      Y_df: samples x consequences
+      C_ctx_sig_df: contexts x signatures (fixed COSMIC signatures)
 
     Latent (learned):
-      theta  (samples × signatures): tumor exposures
-      A      (signatures × consequences): consequence weights
+      theta  (samples x signatures): tumor exposures
+      A      (signatures x consequences): consequence weights
     """
 
     # --------------------------- init ---------------------------------
@@ -71,21 +71,21 @@ class GammaPoissonCoupledModel:
 
     @property
     def theta_mean(self) -> np.ndarray:
-        """Posterior mean E[theta_ik] = a_tilde / b_tilde (numpy array n × K)."""
+        """Posterior mean E[theta_ik] = a_tilde / b_tilde (numpy array n x K)."""
         if self.a_tilde is None or self.b_tilde is None:
             raise RuntimeError("Model is not fitted yet.")
         return self.a_tilde / self.b_tilde
 
     @property
     def A_mean(self) -> np.ndarray:
-        """Posterior mean E[A_kℓ] = beta_tilde / gamma_tilde (numpy array K × L)."""
+        """Posterior mean E[A_kl] = beta_tilde / gamma_tilde (numpy array K x L)."""
         if self.beta_tilde is None or self.gamma_tilde is None:
             raise RuntimeError("Model is not fitted yet.")
         return self.beta_tilde / self.gamma_tilde
 
     @property
     def theta_df(self) -> pd.DataFrame:
-        """Posterior mean theta as DataFrame: samples × signatures."""
+        """Posterior mean theta as DataFrame: samples x signatures."""
         if self.sample_ids is None or self.signature_labels is None:
             raise RuntimeError("Labels not set; fit the model first.")
         return pd.DataFrame(self.theta_mean,
@@ -94,7 +94,7 @@ class GammaPoissonCoupledModel:
 
     @property
     def A_df(self) -> pd.DataFrame:
-        """Posterior mean A as DataFrame: signatures × consequences."""
+        """Posterior mean A as DataFrame: signatures x consequences."""
         if self.signature_labels is None or self.consequence_labels is None:
             raise RuntimeError("Labels not set; fit the model first.")
         return pd.DataFrame(self.A_mean,
@@ -103,7 +103,7 @@ class GammaPoissonCoupledModel:
 
     @property
     def A_row_normalized(self) -> np.ndarray:
-        """Row-normalized A (numpy K × L)."""
+        """Row-normalized A (numpy K x L)."""
         A = self.A_mean
         row_sums = A.sum(axis=1, keepdims=True)
         row_sums = np.where(row_sums == 0.0, 1.0, row_sums)
@@ -111,7 +111,7 @@ class GammaPoissonCoupledModel:
 
     @property
     def A_row_normalized_df(self) -> pd.DataFrame:
-        """Row-normalized A as DataFrame (signatures × consequences)."""
+        """Row-normalized A as DataFrame (signatures x consequences)."""
         if self.signature_labels is None or self.consequence_labels is None:
             raise RuntimeError("Labels not set; fit the model first.")
         A_norm = self.A_row_normalized
@@ -132,9 +132,9 @@ class GammaPoissonCoupledModel:
 
         Parameters
         ----------
-        X_df : DataFrame (samples × contexts)
-        Y_df : DataFrame (samples × consequences)
-        C_ctx_sig_df : DataFrame (contexts × signatures)
+        X_df : DataFrame (samples x contexts)
+        Y_df : DataFrame (samples x consequences)
+        C_ctx_sig_df : DataFrame (contexts x signatures)
         """
         # Align sample IDs between X and Y
         if not X_df.index.equals(Y_df.index):
@@ -192,6 +192,9 @@ class GammaPoissonCoupledModel:
         beta_h = np.broadcast_to(self.config.beta, (L,))
         gamma_h = np.broadcast_to(self.config.gamma, (L,))
 
+        # store ELBO history if desired
+        self.elbo_history = []
+
         # --------- initialize variational parameters (theta, A) --------
 
         # theta variational params
@@ -218,34 +221,38 @@ class GammaPoissonCoupledModel:
 
         # ----------------- VI update loop ------------------------------
 
+        eps = 1e-12  # for safe logs
+
         for it in range(self.config.max_iter):
+            # Current expectations
             theta_mean = self.theta_mean  # (n, K)
             A_mean = self.A_mean          # (K, L)
 
-            # ------- SBS responsibilities r_X(i,k,m) -------
-            # shape n × K × M : theta_mean(i,k) * C_sig_ctx(k,m)
-            thetaC = theta_mean[:, :, None] * self.C_sig_ctx[None, :, :]  # n×K×M
-            denom_X = thetaC.sum(axis=1, keepdims=True)                   # n×1×M
-            denom_X = np.where(denom_X == 0.0, 1.0, denom_X)
-            r_X = thetaC / denom_X                                        # n×K×M
-            X_hat = self.X[:, None, :] * r_X                              # n×K×M
-            X_hat_sum_m = X_hat.sum(axis=2)                               # n×K
+            # ---------- MFVI responsibilities using exp(E[log ·]) ----------
+            E_log_theta = digamma(self.a_tilde) - np.log(self.b_tilde)          # (n,K)
+            E_log_A     = digamma(self.beta_tilde) - np.log(self.gamma_tilde)  # (K,L)
 
-            # ------- consequence responsibilities r_Y(i,k,l) -------
-            thetaA = theta_mean[:, :, None] * A_mean[None, :, :]          # n×K×L
-            denom_Y = thetaA.sum(axis=1, keepdims=True)                   # n×1×L
-            denom_Y = np.where(denom_Y == 0.0, 1.0, denom_Y)
-            r_Y = thetaA / denom_Y                                        # n×K×L
+            # X-channel: r_X(i,k,m) ∝ exp(E_log_theta(i,k)) * C(k,m)
+            log_C = np.log(np.clip(self.C_sig_ctx, eps, None))                  # (K,M)
+            logits_X = E_log_theta[:, :, None] + log_C[None, :, :]              # (n,K,M)
+            r_X = softmax(logits_X, axis=1)                                     # softmax over k
 
-            Y_hat = self.Y[:, None, :] * r_Y                              # n×K×L
-            Y_hat_sum_l = Y_hat.sum(axis=2)                               # n×K
-            Y_hat_sum_i = Y_hat.sum(axis=0)                               # K×L
+            X_hat = self.X[:, None, :] * r_X                                    # (n,K,M)
+            X_hat_sum_m = X_hat.sum(axis=2)                                     # (n,K)
+
+            # Y-channel: r_Y(i,k,l) ∝ exp(E_log_theta(i,k) + E_log_A(k,l))
+            logits_Y = E_log_theta[:, :, None] + E_log_A[None, :, :]            # (n,K,L)
+            r_Y = softmax(logits_Y, axis=1)                                     # softmax over k
+
+            Y_hat = self.Y[:, None, :] * r_Y                                    # (n,K,L)
+            Y_hat_sum_l = Y_hat.sum(axis=2)                                     # (n,K)
+            Y_hat_sum_i = Y_hat.sum(axis=0)                                     # (K,L)
 
             # ------- Update variational parameters -------
             # theta
-            self.a_tilde = a_h[None, :] + X_hat_sum_m + Y_hat_sum_l       # n×K
+            self.a_tilde = a_h[None, :] + X_hat_sum_m + Y_hat_sum_l             # (n,K)
 
-            A_row_sums = A_mean.sum(axis=1)                               # K
+            A_row_sums = A_mean.sum(axis=1)                                     # (K,)
             self.b_tilde = (
                 b_h[None, :]
                 + self.s[:, None] * C_row_sums[None, :]
@@ -253,11 +260,11 @@ class GammaPoissonCoupledModel:
             )
 
             # A
-            self.beta_tilde = beta_h[None, :] + Y_hat_sum_i               # K×L
+            self.beta_tilde = beta_h[None, :] + Y_hat_sum_i                     # (K,L)
 
             theta_mean = self.theta_mean
-            gamma_add = (self.u[:, None] * theta_mean).sum(axis=0)        # K
-            self.gamma_tilde = gamma_h[None, :] + gamma_add[:, None]      # K×L
+            gamma_add = (self.u[:, None] * theta_mean).sum(axis=0)              # (K,)
+            self.gamma_tilde = gamma_h[None, :] + gamma_add[:, None]            # (K,L)
 
             # ------- Convergence check (ELBO-based) -------
             if it % 10 == 0 or it == self.config.max_iter - 1:
@@ -273,11 +280,11 @@ class GammaPoissonCoupledModel:
                 max_rel_change = max(rel_change_theta, rel_change_A)
 
                 elbo_now = self._elbo_from_current_state(r_X, r_Y, X_hat, Y_hat)
-
+                self.elbo_history.append(elbo_now)
                 if self.config.verbose:
                     print(
                         f"[iter {it}] max rel change: {max_rel_change:.3e}, "
-                        f"ELBO: {elbo_now:.3e}"
+                        f"ELBO: {elbo_now:.6e}, ΔELBO={elbo_now - prev_elbo:.6e}"
                     )
 
                 if elbo_now - prev_elbo < self.config.tol:
@@ -298,7 +305,7 @@ class GammaPoissonCoupledModel:
 
     def expected_lambda_Y(self) -> np.ndarray:
         """
-        Expected Poisson rate for Y (numpy): λ_hat(i,ℓ) = u_i * sum_k theta(i,k)*A(k,ℓ).
+        Expected Poisson rate for Y (numpy): λ_hat(i,l) = u_i * sum_k theta(i,k)*A(k,l).
         Shape: (n, L).
         """
         if self.u is None:
@@ -309,7 +316,7 @@ class GammaPoissonCoupledModel:
         return self.u[:, None] * rates
 
     def expected_lambda_Y_df(self) -> pd.DataFrame:
-        """Expected λ_Y as DataFrame (samples × consequences)."""
+        """Expected λ_Y as DataFrame (samples x consequences)."""
         lam = self.expected_lambda_Y()
         return pd.DataFrame(lam,
                             index=self.sample_ids,
@@ -319,7 +326,7 @@ class GammaPoissonCoupledModel:
         """
         Expected Poisson rate for X (numpy):
           λ_hat(i,m) = s_i * sum_k theta(i,k) * C(k,m),
-        where C is signatures × contexts (self.C_sig_ctx).
+        where C is signatures x contexts (self.C_sig_ctx).
         Shape: (n, M).
         """
         if self.s is None or self.C_sig_ctx is None:
@@ -329,17 +336,18 @@ class GammaPoissonCoupledModel:
         return self.s[:, None] * rates
 
     def expected_lambda_X_df(self) -> pd.DataFrame:
-        """Expected λ_X as DataFrame (samples × contexts)."""
+        """Expected λ_X as DataFrame (samples x contexts)."""
         lam = self.expected_lambda_X()
         return pd.DataFrame(lam,
                             index=self.sample_ids,
                             columns=self.context_labels)
-# ------------------------------------------------------------ elbo ------------------------------------------------------------
+
+    # ------------------------------------------------------------ elbo ------------------------------------------------------------
 
     def _elbo_from_current_state(self, r_X, r_Y, X_hat, Y_hat) -> float:
         """
         Full ELBO (up to data-only constants) given current variational params
-        and responsibilities r_X, r_Y, expected allocations X_hat, Y_hat.
+        and weights r_X, r_Y, expected allocations X_hat, Y_hat.
         """
         X = self.X.astype(float)        # (n,M)
         Y = self.Y.astype(float)        # (n,L)
@@ -406,7 +414,6 @@ class GammaPoissonCoupledModel:
         ).sum()
 
         term_X2 = ((s[:, None] * theta_mean) @ C).sum()
-
         L_X = term_X1 - term_X2
 
         # --- Y allocation / Poisson part ---
@@ -423,7 +430,6 @@ class GammaPoissonCoupledModel:
         ).sum()
 
         term_Y2 = ((u[:, None] * theta_mean) @ A_mean).sum()
-
         L_Y = term_Y1 - term_Y2
 
         elbo = log_p_theta + H_theta + log_p_A + H_A + L_X + L_Y
