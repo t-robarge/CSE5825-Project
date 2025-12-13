@@ -454,7 +454,7 @@ def main():
                 os.path.join(args.outdir, "lambda_Y_nnls_baseline.csv")
             )
         # ELBO history
-        model.elbo_history.to_csv(os.path.join(args.outdir, "elbo_history.csv"))
+        pd.Series(model.elbo_history).to_csv(os.path.join(args.outdir, "elbo_history.csv"))
         # Metrics JSON
         metrics_out = {
             "global_deviance": float(metrics["global_deviance"]),
