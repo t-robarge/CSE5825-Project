@@ -1,4 +1,3 @@
-# eval.py
 from __future__ import annotations
 
 from typing import Dict, Tuple
@@ -95,7 +94,7 @@ def relative_error_Y(
     Returns
     -------
     dict with:
-      - "rel_err_df": DataFrame (samples × consequences)
+      - "rel_err_df": DataFrame (samples x consequences)
       - "mean_rel_err": float (global mean over all cells)
       - "mean_rel_err_per_sample": Series (mean over consequences for each sample)
     """
@@ -130,13 +129,13 @@ def evaluate_fit_Y(
     Parameters
     ----------
     model : GammaPoissonCoupledModel
-    Y_df : DataFrame (samples × consequences), optional.
+    Y_df : DataFrame (samples x consequences), optional.
         If None, uses model.Y_df.
 
     Returns
     -------
     dict with:
-      - "lambda_Y_df": DataFrame (samples × consequences)
+      - "lambda_Y_df": DataFrame (samples x consequences)
       - "per_sample_deviance": Series indexed by sample_id
       - "global_deviance": float
       - "rmse": float
@@ -209,7 +208,7 @@ def posterior_predictive_Y(
     """
     Draw posterior predictive replicated consequence counts:
 
-      Y_tilde(i,ℓ) ~ Poisson(λ_hat(i,ℓ))
+      Y_tilde(i,l) ~ Poisson(λ_hat(i,l))
 
     Returns
     -------
@@ -237,13 +236,13 @@ def global_consequence_baseline(
     """
     Global consequence baseline (no signatures).
 
-    A_bar(ℓ) = sum_i Y(i,ℓ) / sum_{i,ℓ} Y(i,ℓ)
-    λ_hat(i,ℓ) = u_i * A_bar(ℓ),  where u_i = sum_ℓ Y(i,ℓ).
+    A_bar(l) = sum_i Y(i,l) / sum_{i,l} Y(i,l)
+    λ_hat(i,l) = u_i * A_bar(l),  where u_i = sum_l Y(i,l).
 
     Returns
     -------
     A_bar : Series (consequences)
-    lambda_Y_df : DataFrame (samples × consequences)
+    lambda_Y_df : DataFrame (samples x consequences)
     """
     Y = Y_df.values.astype(float)
     n, L = Y.shape
@@ -270,14 +269,14 @@ def shared_consequence_baseline(
     """
     Shared consequence mixture baseline:
 
-      Y(i,ℓ) ~ Poisson( u_i * sum_k theta(i,k) * A_shared(ℓ) )
+      Y(i,l) ~ Poisson( u_i * sum_k theta(i,k) * A_shared(l) )
       r_i = u_i * sum_k theta(i,k)
-      A_shared(ℓ) = sum_i Y(i,ℓ) / sum_i r_i
+      A_shared(l) = sum_i Y(i,l) / sum_i r_i
 
     Returns
     -------
     A_shared : Series (consequences)
-    lambda_Y_df : DataFrame (samples × consequences)
+    lambda_Y_df : DataFrame (samples x consequences)
     """
     if Y_df is None:
         if model.Y_df is None:
@@ -378,18 +377,18 @@ def nnls_factorization_baseline_predict(
     Given an NNLS-estimated A (typically from the training set), compute
     baseline predictions for a new dataset (e.g. test set):
 
-        λ_hat(i,ℓ) = u_i * (θ A_nnls)_{iℓ}
+        λ_hat(i,l) = u_i * (θ A_nnls)_{i,l}
 
     Parameters
     ----------
     model : GammaPoissonCoupledModel
         Used only as a fallback source for theta / u if not passed explicitly.
-    A_nnls_df : DataFrame (K × L)
+    A_nnls_df : DataFrame (K x L)
         NNLS-estimated consequence matrix (rows = signatures, cols = consequences).
-    Y_df : DataFrame (samples × consequences), optional
+    Y_df : DataFrame (samples x consequences), optional
         Only used for sample index / column labels. If None, we infer the index
         from theta_df and columns from A_nnls_df.
-    theta_df : DataFrame (samples × K), optional
+    theta_df : DataFrame (samples x K), optional
         Signature exposures for the dataset (e.g. test set). If None, falls back
         to model.theta_mean.
     u : np.ndarray, shape (n,), optional
@@ -398,7 +397,7 @@ def nnls_factorization_baseline_predict(
 
     Returns
     -------
-    lambda_Y_df : DataFrame (samples × consequences)
+    lambda_Y_df : DataFrame (samples x consequences)
         Predicted mean counts under the NNLS baseline.
     """
     # Exposures
@@ -420,7 +419,6 @@ def nnls_factorization_baseline_predict(
     Theta = theta_mean.values.astype(float)          # n × K
     A_nnls = A_nnls_df.values.astype(float)          # K × L
 
-    # λ_hat = u_i * (Θ A)_iℓ
     lam = u_vec[:, None] * (Theta @ A_nnls)          # n × L
 
     # Index / column labels

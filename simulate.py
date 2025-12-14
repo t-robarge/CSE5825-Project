@@ -38,13 +38,13 @@ def infer_theta_for_new_samples(
     ----------
     model : fitted GammaPoissonCoupledModel
         Must already have A_mean, C_sig_ctx, config, etc.
-    X_df : DataFrame (samples × contexts)
-    Y_df : DataFrame (samples × consequences)
+    X_df : DataFrame (samples x contexts)
+    Y_df : DataFrame (samples x consequences)
         Must have matching sample IDs.
 
     Returns
     -------
-    theta_new_df : DataFrame (samples × signatures)
+    theta_new_df : DataFrame (samples x signatures)
         Posterior means E_q[theta] for the new samples.
     """
     if not X_df.index.equals(Y_df.index):
@@ -142,21 +142,21 @@ def simulate_coupled_data(
     pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, np.ndarray, np.ndarray
 ]:
     """
-    Simulate X, Y from a synthetic coupled model using *real* C (contexts × signatures).
+    Simulate X, Y from a synthetic coupled model using C (contexts x signatures).
 
     Parameters
     ----------
     n_samples : int
-    C_ctx_sig_df : DataFrame (contexts × signatures)
+    C_ctx_sig_df : DataFrame (contexts x signatures)
     consequence_labels : list of consequence type names
     random_state : int or None
 
     Returns
     -------
-    X_df : samples × contexts
-    Y_df : samples × consequences
-    theta_true_df : samples × signatures
-    A_true_df : signatures × consequences
+    X_df : samples x contexts
+    Y_df : samples x consequences
+    theta_true_df : samples x signatures
+    A_true_df : signatures x consequences
     s : np.ndarray (n,) total SBS counts
     u : np.ndarray (n,) total consequence counts
     """
@@ -229,7 +229,7 @@ def load_Y_csv(path: str) -> pd.DataFrame:
 
 def load_C_txt(path: str) -> pd.DataFrame:
     """
-    Load C (contexts × signatures) from txt.
+    Load C (contexts x signatures) from txt.
 
     Expects:
       - first column: context labels (index)
@@ -246,12 +246,11 @@ def main():
         description="Fit coupled Gamma–Poisson model to labeled X, Y, C CSVs."
     )
     parser.add_argument("--X_csv", required=True,
-                        help="Path to X CSV (samples × contexts). First column = sample IDs.")
+                        help="Path to X CSV (samples x contexts). First column = sample IDs.")
     parser.add_argument("--Y_csv", required=True,
-                        help="Path to Y CSV (samples × consequences). First column = sample IDs.")
+                        help="Path to Y CSV (samples x consequences). First column = sample IDs.")
     parser.add_argument("--C_csv", required=True,
-                        help="Path to C CSV (contexts × signatures). First column = context labels.")
-
+                        help="Path to C CSV (contexts x signatures). First column = context labels.")
     parser.add_argument("--max_iter", type=int, default=1000)
     parser.add_argument("--tol", type=float, default=1e-4)
     parser.add_argument("--a", type=float, default=1.0)
@@ -377,9 +376,6 @@ def main():
     rmse_global = _rmse_np(Y_train.values, lam_global_df.values)
     print(f"Global baseline RMSE: {rmse_global:.4f}")
 
-    A_shared, lam_shared_df = shared_consequence_baseline(model, Y_train)
-    rmse_shared = _rmse_np(Y_train.values, lam_shared_df.values)
-    print(f"Shared-A baseline RMSE: {rmse_shared:.4f}")
 
     try:
         A_nnls_df, lam_nnls_df = nnls_factorization_baseline(model, Y_train)
@@ -401,18 +397,13 @@ def main():
         rmse_global_test = _rmse_np(Y_test.values, lam_global_test_df.values)
         print(f"Global baseline RMSE (test): {rmse_global_test:.4f}")
 
-        # Shared-A baseline on test set
-        A_shared_test, lam_shared_test_df = shared_consequence_baseline(model, Y_test, theta_test_df, u_test)
-        rmse_shared_test = _rmse_np(Y_test.values, lam_shared_test_df.values)
-        print(f"Shared-A baseline RMSE (test): {rmse_shared_test:.4f}")
-
         # NNLS baseline on test set
         # Train side
         A_nnls_df, lambda_train_nnls = nnls_factorization_baseline(model, Y_train)
 
         # Test side (using same A_nnls_df)
         lambda_test_nnls = nnls_factorization_baseline_predict(
-            model,           # just for fallbacks if you like
+            model,      
             A_nnls_df,
             Y_df=Y_test,
             theta_df=theta_test_df,
@@ -443,10 +434,6 @@ def main():
         A_bar.to_csv(os.path.join(args.outdir, "A_global_baseline.csv"))
         lam_global_df.to_csv(os.path.join(args.outdir, "lambda_Y_global_baseline.csv"))
 
-        A_shared.to_csv(os.path.join(args.outdir, "A_shared_baseline.csv"))
-        lam_shared_df.to_csv(
-            os.path.join(args.outdir, "lambda_Y_shared_baseline.csv")
-        )
 
         if nnls_available and A_nnls_df is not None:
             A_nnls_df.to_csv(os.path.join(args.outdir, "A_nnls_baseline.csv"))
@@ -460,7 +447,6 @@ def main():
             "global_deviance": float(metrics["global_deviance"]),
             "rmse_coupled": float(metrics["rmse"]),
             "rmse_global_baseline": float(rmse_global),
-            "rmse_shared_baseline": float(rmse_shared),
             "nnls_available": nnls_available,
         }
         if nnls_available and rmse_nnls is not None:
